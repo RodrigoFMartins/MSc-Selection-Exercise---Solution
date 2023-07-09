@@ -1,15 +1,20 @@
 package mysql
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"errors"
 	"exercise-backend/config"
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 
 	"bitbucket.org/liamstask/goose/lib/goose"
 	"github.com/jinzhu/gorm"
+	"golang.org/x/crypto/argon2"
 )
 
 var lock = &sync.Mutex{}
@@ -108,7 +113,8 @@ func VerifyCredentials(username, password string) (bool, error) {
 		return false, err
 	}
 
-	if user.Password != password {
+	val, irr := comparePasswordHash(password, user.Password)
+	if !val || irr != nil {
 		return false, errors.New("invalid username or password")
 	}
 
@@ -202,6 +208,15 @@ func CreatePersonFromData(data []string) error {
 			}
 
 		case "Password":
+			/*
+				passwrd, err1 := hashPassword(value)
+				if err1 == nil {
+					person.Password = passwrd
+				} else {
+					log.Print("password problem")
+					return errors.New("password problem")
+				}
+			*/
 			person.Password = value
 		case "Role":
 			person.Role = value
@@ -237,4 +252,75 @@ func UsernameExists(username string) (bool, error) {
 	}
 
 	return count > 0, nil
+}
+
+const (
+	// Define the parameters for the Argon2 hashing algorithm
+	iterations  = 4
+	memory      = 64 * 1024 // 64MB
+	parallelism = 4
+	saltSize    = 16
+	keyLength   = 32
+)
+
+func hashPassword(password string) (string, error) {
+	// Generate a random salt
+	salt := make([]byte, saltSize)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+
+	// Hash the password using Argon2
+	hash := argon2.IDKey([]byte(password), salt, iterations, memory, parallelism, keyLength)
+
+	// Encode the salt and hashed password as a single string
+	encodedSalt := base64.StdEncoding.EncodeToString(salt)
+	encodedHash := base64.StdEncoding.EncodeToString(hash)
+	encodedPassword := fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s", argon2.Version, memory, iterations, parallelism, encodedSalt, encodedHash)
+
+	return encodedPassword, nil
+}
+
+func comparePasswordHash(password, encodedPassword string) (bool, error) {
+	if !strings.HasPrefix(encodedPassword, "$argon2id$") {
+		return password == encodedPassword, nil
+	}
+
+	// Extract the parameters and encoded salt from the encoded password
+	var version, m, t uint32
+	var encodedSalt, encodedHash string
+	var p uint8
+	log.Print("aaaa", password, encodedPassword)
+	n, err := fmt.Sscanf(encodedPassword, "$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s", &version, &m, &t, &p, &encodedSalt, &encodedHash)
+
+	log.Print(version)
+	log.Print(m)
+	log.Print(t)
+	log.Print(p)
+	log.Print(encodedSalt)
+	log.Print(encodedHash)
+	if err != nil {
+		return false, err
+	}
+	log.Print(password, encodedPassword)
+	// Check if all expected fields were successfully scanned
+	if n != 6 {
+		return false, errors.New("invalid encoded password format")
+	}
+
+	salt, err := base64.StdEncoding.DecodeString(encodedSalt)
+	if err != nil {
+		return false, err
+	}
+
+	hash, err := base64.StdEncoding.DecodeString(encodedHash)
+	if err != nil {
+		return false, err
+	}
+
+	// Hash the input password using the extracted salt and parameters
+	comparisonHash := argon2.IDKey([]byte(password), salt, t, m, p, uint32(len(hash)))
+
+	// Compare the generated hash with the stored hash using subtle.ConstantTimeCompare
+	return subtle.ConstantTimeCompare(hash, comparisonHash) == 1, nil
 }
