@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
@@ -28,6 +29,15 @@ type Claims struct {
 	Username string `json:"username"`
 	jwt.StandardClaims
 }
+
+var (
+	failedLogins      = make(map[string]int)
+	failedLoginsMux   sync.Mutex
+	loginCooldown     = make(map[string]time.Time)
+	loginCooldownMux  sync.Mutex
+	loginCooldownTime = 30 * time.Second
+	maxFailedAttempts = 3
+)
 
 var secretKey string
 
@@ -86,11 +96,23 @@ func loginUser(w http.ResponseWriter, r *http.Request) {
 	username := creds.Username
 	password := creds.Password
 
+	loginCooldownMux.Lock()
+	cooldownTime, cooldownExists := loginCooldown[username]
+	loginCooldownMux.Unlock()
+
+	if cooldownExists && time.Now().Before(cooldownTime) {
+		remainingTime := cooldownTime.Sub(time.Now())
+		http.Error(w, fmt.Sprintf("Too many login attempts. Please wait %s before trying again.", remainingTime), http.StatusTooManyRequests)
+		return
+	}
+
 	// Validate credentials against stored data
 	isAuth, ir := mysql.VerifyCredentials(username, password)
 	log.Print(ir, isAuth)
 
 	if isAuth && ir == nil {
+		resetLoginAttempts(username) // Reset login attempts upon successful login
+
 		log.Print("autenticado")
 		idUse, irra := mysql.GetIDbyUserName(username)
 		if irra != nil {
@@ -117,13 +139,50 @@ func loginUser(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"token": tokenString})
 	} else {
+		incrementLoginAttempts(username)
+
+		failedLoginsMux.Lock()
+		attempts := failedLogins[username]
+		failedLoginsMux.Unlock()
+
+		if attempts >= maxFailedAttempts {
+			startLoginCooldown(username)
+			http.Error(w, fmt.Sprintf("Too many login attempts. Please wait %s before trying again.", loginCooldownTime), http.StatusTooManyRequests)
+			return
+		}
+
 		// Set the status code to 403 Forbidden
 		w.WriteHeader(http.StatusForbidden)
 
 		// Write a response body
 		fmt.Fprint(w, "403 Forbidden - Access Denied")
 	}
+}
 
+func incrementLoginAttempts(username string) {
+	failedLoginsMux.Lock()
+	failedLogins[username]++
+	failedLoginsMux.Unlock()
+}
+
+func resetLoginAttempts(username string) {
+	failedLoginsMux.Lock()
+	delete(failedLogins, username)
+	failedLoginsMux.Unlock()
+}
+
+func startLoginCooldown(username string) {
+	go func() {
+		loginCooldownMux.Lock()
+		loginCooldown[username] = time.Now().Add(loginCooldownTime)
+		loginCooldownMux.Unlock()
+
+		time.Sleep(loginCooldownTime)
+
+		loginCooldownMux.Lock()
+		delete(loginCooldown, username)
+		loginCooldownMux.Unlock()
+	}()
 }
 
 func generateSecretKey(length int) error {
