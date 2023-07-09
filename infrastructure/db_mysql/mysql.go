@@ -149,6 +149,23 @@ func GetDatabyID(idUser string) (Persons, error) {
 	return user, err
 }
 
+func GetRoleByID(idUser string) (string, error) {
+	db, err := GetMysqlConn()
+	user := Persons{}
+	if err != nil {
+		return "normal", err
+	}
+	err = db.Where("ID = ?", idUser).First(&user).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "normal", errors.New("invalid ID")
+		}
+		return "normal", err
+	}
+
+	return user.Role, err
+}
+
 func PersonToString(per Persons) []string {
 	// Convert the Person struct to an array of strings
 	return []string{per.Name, fmt.Sprintf("%d", per.Age), per.Family, per.Role}

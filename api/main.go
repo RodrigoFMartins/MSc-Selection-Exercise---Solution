@@ -229,6 +229,12 @@ func getPerson(w http.ResponseWriter, r *http.Request) {
 func createPerson(w http.ResponseWriter, r *http.Request) {
 	// Retrieve the username from the request context
 	idUserSender := r.Context().Value("username").(string)
+	role, errror := mysql.GetRoleByID(idUserSender)
+
+	if role != "admin" || errror != nil {
+		http.Error(w, "Not an Admin!", http.StatusBadRequest)
+		return
+	}
 	// Read the request body
 	var data map[string]interface{}
 	err := json.NewDecoder(r.Body).Decode(&data)
