@@ -8,6 +8,7 @@ import (
 	"exercise-backend/config"
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,7 +19,7 @@ import (
 )
 
 var lock = &sync.Mutex{}
-
+var usernameExistsLock = &sync.Mutex{}
 var dbConn *gorm.DB
 
 type Persons struct {
@@ -208,16 +209,14 @@ func CreatePersonFromData(data []string) error {
 			}
 
 		case "Password":
-			/*
-				passwrd, err1 := hashPassword(value)
-				if err1 == nil {
-					person.Password = passwrd
-				} else {
-					log.Print("password problem")
-					return errors.New("password problem")
-				}
-			*/
-			person.Password = value
+			passwrd, err1 := hashPassword(value)
+			if err1 == nil {
+				person.Password = passwrd
+			} else {
+				log.Print("password problem")
+				return errors.New("password problem")
+			}
+			person.Password = passwrd
 		case "Role":
 			person.Role = value
 		default:
@@ -238,6 +237,10 @@ func CreatePersonFromData(data []string) error {
 }
 
 func UsernameExists(username string) (bool, error) {
+	// Lock access to the database
+	usernameExistsLock.Lock()
+	defer usernameExistsLock.Unlock()
+
 	db, err := GetMysqlConn()
 	if err != nil {
 		return false, err
@@ -255,7 +258,7 @@ func UsernameExists(username string) (bool, error) {
 }
 
 const (
-	// Define the parameters for the Argon2 hashing algorithm
+	// Define the parameters for the Argon2 hashing algorithm, some of this should be studied for better performance and security
 	iterations  = 4
 	memory      = 64 * 1024 // 64MB
 	parallelism = 4
@@ -276,7 +279,7 @@ func hashPassword(password string) (string, error) {
 	// Encode the salt and hashed password as a single string
 	encodedSalt := base64.StdEncoding.EncodeToString(salt)
 	encodedHash := base64.StdEncoding.EncodeToString(hash)
-	encodedPassword := fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s", argon2.Version, memory, iterations, parallelism, encodedSalt, encodedHash)
+	encodedPassword := fmt.Sprintf("$argon2id$v=%d$%s$%s", argon2.Version, encodedSalt, encodedHash)
 
 	return encodedPassword, nil
 }
@@ -287,26 +290,30 @@ func comparePasswordHash(password, encodedPassword string) (bool, error) {
 	}
 
 	// Extract the parameters and encoded salt from the encoded password
-	var version, m, t uint32
-	var encodedSalt, encodedHash string
-	var p uint8
-	log.Print("aaaa", password, encodedPassword)
-	n, err := fmt.Sscanf(encodedPassword, "$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s", &version, &m, &t, &p, &encodedSalt, &encodedHash)
 
-	log.Print(version)
-	log.Print(m)
-	log.Print(t)
-	log.Print(p)
-	log.Print(encodedSalt)
-	log.Print(encodedHash)
-	if err != nil {
-		return false, err
-	}
-	log.Print(password, encodedPassword)
-	// Check if all expected fields were successfully scanned
-	if n != 6 {
+	log.Print("aaaa", password, encodedPassword)
+	// Define the regular expression pattern
+	pattern := `^\$argon2id\$v=(\d+)\$([^$]+)\$([^$]+)$`
+
+	// Compile the regular expression
+	regex := regexp.MustCompile(pattern)
+
+	// Find the submatches
+	matches := regex.FindStringSubmatch(encodedPassword)
+
+	// Extract the values from the submatches
+	versionP, err3 := strconv.Atoi(matches[1])
+	version := uint32(versionP)
+
+	if err3 != nil {
 		return false, errors.New("invalid encoded password format")
 	}
+	encodedSalt := matches[2]
+	encodedHash := matches[3]
+
+	log.Print(version)
+	log.Print(encodedSalt)
+	log.Print(encodedHash)
 
 	salt, err := base64.StdEncoding.DecodeString(encodedSalt)
 	if err != nil {
@@ -319,7 +326,7 @@ func comparePasswordHash(password, encodedPassword string) (bool, error) {
 	}
 
 	// Hash the input password using the extracted salt and parameters
-	comparisonHash := argon2.IDKey([]byte(password), salt, t, m, p, uint32(len(hash)))
+	comparisonHash := argon2.IDKey([]byte(password), salt, iterations, memory, parallelism, uint32(len(hash)))
 
 	// Compare the generated hash with the stored hash using subtle.ConstantTimeCompare
 	return subtle.ConstantTimeCompare(hash, comparisonHash) == 1, nil
